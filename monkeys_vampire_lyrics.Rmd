@@ -1,0 +1,188 @@
+---
+title: "Arctic Monkeys Lyrics Using geniusR Package"
+output: html_notebook
+---
+
+Using Josiah Parry's [geniusR package](https://medium.com/@JosiahParry/introducing-geniusr-b0177ce7b4d7) to scrape Arctic Monkeys lyrics. I have worked on lyric scraping before and it can be a pain, so I'm really excited about this package.
+```{r}
+devtools::install_github("josiahparry/geniusR") 
+library(geniusR) 
+library(tidyverse)
+library(tidytext)
+library(rvest)
+library(readr)
+```
+
+Checking out some of the capabilities
+
+```{r}
+# tracklist from "suck it and see"
+genius_tracklist(artist = "Arctic Monkeys", album = "Suck it and See")
+```
+Cool!
+
+I want to see what words AM uses a lot. I could try to get a random sample of other bands' lyrics, but I think I will just pick a band. I'm going to compare AM to an American band with a similarly eclectic vocabulary, Vampire Weekend.
+
+It looks like you can get lyrics one album at a time. So, I'll need a list of the albums for both artists. This could be done programatically, but the Genius website has some complicated javascript that makes it difficult to scrape. In the interest of getting this done, I'm going to hard-code the albums and their dates (dates because I will probably look at change in lyrics over time).
+
+```{r}
+# Monkeys
+am_titles <- c("Whatever People Say I Am, That s What I m Not",
+               "Favourite Worst Nightmare",
+               "Humbug",
+               "Suck it and See",
+               "AM")
+am_years <- c("2006-01-01",
+              "2007-01-01",
+              "2009-01-01",
+              "2011-01-01",
+              "2013-01-01")
+
+am_albums <- data_frame(title = am_titles, date = as.Date(am_years))
+
+# VW
+
+vw_titles <- c("Vampire Weekend",
+               "Contra",
+               "Modern Vampires of the City")
+vw_years <- c("2008-01-01",
+              "2010-01-01",
+              "2013-01-01")
+
+vw_albums <- data_frame(title = vw_titles, data = as.Date(vw_years))
+```
+
+Now have dataframes with the album names and dates. I will apply geniusR::genius_album to each album title to get all of the lyrics.
+
+Had a problem with "Whatever people say I am, that's what I'm not".
+
+The package translates the URL as /Whatever-people-say-i-am-thats-what-im-not; the actual URL is Whatever-people-say-i-am-that-s-what-i-m-not. Can fix by putting spaces instead of apostrophes. Apostrophes are weird in R. This might be an encoding issue, I'm not sure.
+
+```{r}
+
+# doing it in a loop bc apply is too hard
+am_lyr <- data_frame()
+for(i in 1:nrow(am_albums)){
+  current_lyr <- genius_album("Arctic Monkeys", am_albums$title[i]) %>% 
+    mutate(album = am_albums$title[i])
+  am_lyr <- rbind(am_lyr, current_lyr)
+  message(i)
+}
+
+vw_lyr <- data_frame()
+for(i in 1:nrow(vw_albums)){
+  current_lyr <- genius_album("Vampire Weekend", vw_albums$title[i]) %>% 
+    mutate(album = vw_albums$title[i])
+  vw_lyr <- rbind(vw_lyr, current_lyr)
+  message(i)
+}
+```
+Now combining these to make one data frame with both artists
+
+```{r}
+am_lyr <- am_lyr %>%
+  mutate(artist = "Arctic Monkeys")
+
+vw_lyr <- vw_lyr %>%
+  mutate(artist = "Vampire Weekend")
+
+lyr <- rbind(am_lyr, vw_lyr)
+
+write_csv(lyr, "monkeys_vampire_lyr.csv")
+```
+
+Now can start analysis of the lyrics! Will start by tokeninzing by individual word and examining the usage of words for both groups
+
+```{r}
+lyr_words <- lyr %>% 
+  unnest_tokens(word, text)
+
+lyr_words %>% 
+  anti_join(stop_words) %>% 
+  count(word, artist, sort = TRUE) %>% 
+  top_n(15)
+```
+Looking at these words, I can tell we'll want to filter some of them out because they appear a ton in individual songs, but aren't necessarily characteristic of the bands overall (for example, "la") is on of the Monkeys' most popular lyrics, and mostly comes from the song "Hellcat Spangled Sha-la-la-la" and "Mad Sounds" whose chorus includes "ooh la la la, ooh la la la, ooh la la la ooh".
+
+We'll make a custom stopword dictionary and anti-join on this as well.
+
+```{r}
+# naming the column "word" so the anti-join will be easy
+word <- c("hey", "yeah", "ya", "ooh", "oooh", "da", "wanna", "blake's")
+am_vw_custom_stopwords <- data_frame(word)
+```
+Now looking at word fequencies for each group
+
+```{r}
+total_words <- lyr_words %>% 
+  group_by(artist) %>% 
+  summarise(total = n())
+  
+lyr_counts <- lyr_words %>% 
+  anti_join(stop_words) %>% 
+  anti_join(am_vw_custom_stopwords) %>% 
+  count(word, artist, sort = TRUE)
+
+lyr_counts <- lyr_counts %>% 
+  left_join(total_words)
+
+lyr_counts <- lyr_counts %>% 
+  mutate(freq = (n / total)*100)
+```
+Now have a dataframe with words and their relative frequencies for both artists. Going to visualize this now using ggplot2. I'll put Arctic Monkeys frequencies on the x-axis and Vampire Weekend frequencies on the y-axis and plot words from there.
+
+Have to do a weird join to get counts for both of the words
+
+```{r}
+AM <- lyr_counts %>% 
+  filter(artist == "Arctic Monkeys")
+
+VW <- lyr_counts %>% 
+  filter(artist =="Vampire Weekend")
+
+lyr_counts <- AM %>% 
+  full_join(VW, by = c("word")) %>% 
+  rename(am_freq = freq.x, vw_freq = freq.y)
+
+# replacing NAs in frequency with 0 so that they will show up on plot
+lyr_counts <- lyr_counts %>% 
+  replace_na(list(am_freq = 0, vw_freq = 0))
+
+lyr_counts %>%
+  filter(am_freq > .06 | vw_freq > .1) %>% 
+  ggplot(aes(x = jitter(am_freq), y = jitter(vw_freq))) +
+  geom_text(aes(label = word),
+            size = 3,
+            color = "navyblue") +
+  theme(axis.text.x = element_text(angle = 70, hjust = 1),
+        legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "lightgrey",
+                                    fill = NA)) +
+  geom_abline(slope = 1, intercept = 0)
+```
+Bigrams
+
+```{r}
+get_common_bigrams <- function(lyrics_df){
+  lyrics_df %>%
+  unnest_tokens(bigram, text, "ngrams", n = 2) %>% 
+  separate(bigram, c("word1", "word2"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  filter(!word1 %in% am_vw_custom_stopwords$word) %>% 
+  filter(!word2 %in% am_vw_custom_stopwords$word) %>%
+  mutate(bigram = paste0(word1, " ", word2)) %>% 
+  count(bigram, sort = TRUE)
+}
+
+# arctic monkeys bigrams
+get_common_bigrams(am_lyr)
+
+# vampire weekend bigrams
+get_common_bigrams(vw_lyr)
+```
+
+Idea: Look at average word length
